@@ -1,0 +1,11 @@
+[
+    {
+        "text": "Compliance Overview\nAperture Cloud maintains SOC 2 Type II certification, renewed annually. The certification audit covers\nthe ingestion pipeline, the retrieval service, and the generation service, but explicitly excludes\ncustomer-managed on-premise deployments, which fall under the customer's own compliance scope.\nEncryption Requirements\nAll customer documents are encrypted at rest using AES-256, and all API traffic is encrypted in transit\nusing TLS 1.2 or higher. Encryption keys are rotated every 90 days, matching the API token rotation\npolicy described in the API reference documentation.\nData Residency\nEnterprise customers on the EU plan have their documents and embeddings stored exclusively in the\neu-west-1 region. Standard plan customers do not have data residency guarantees and may have\ndocuments processed in either us-east-1 or eu-west-1 depending on load balancing at ingestion time.\nAudit Logging\nEvery query and document upload is logged with a timestamp, the requesting API key, and the\nresulting document or query ID, retained according to the query log retention policy for 180 days.",
+        "metadata": {
+            "source": "compliance-overview.pdf",
+            "page": 1,
+            "section": null,
+            "type": "pdf"
+        }
+    }
+]

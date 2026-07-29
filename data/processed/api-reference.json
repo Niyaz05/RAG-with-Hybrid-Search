@@ -1,0 +1,11 @@
+[
+    {
+        "text": "API Reference\n\n\nAuthentication\n\n\nAll requests to the Aperture Cloud API must include an \nAuthorization\n header\nwith a bearer token. Tokens are issued from the developer dashboard under\nSettings > API Keys and are valid for 90 days before requiring rotation.\n\n\nExample header:\n\n\nAuthorization: Bearer ap_live_x7f2k9...\n\n\n\nRequests without a valid token return \n401 Unauthorized\n. Requests with an\nexpired token return \n403 Forbidden\n with the error code \nTOKEN_EXPIRED\n.\n\n\nRate Limiting\n\n\nAll endpoints under \n/v1/\n are rate limited to 100 requests per minute per\nAPI key. Exceeding this limit returns \n429 Too Many Requests\n with a\n\nRetry-After\n header indicating the number of seconds to wait.\n\n\nEnterprise plan customers can request a higher limit of 1000 requests per\nminute by contacting the platform team.\n\n\nEndpoints\n\n\nPOST /v1/documents\n\n\nUploads a new document for indexing. Accepts \nmultipart/form-data\n with a\n\nfile\n field. Maximum file size is 25MB. Returns a \ndocument_id\n that can be\nused to check indexing status.\n\n\nGET /v1/documents/{document_id}/status\n\n\nReturns the indexing status of a document: \npending\n, \nprocessing\n,\n\nindexed\n, or \nfailed\n. Failed documents include an \nerror_code\n field.\n\n\nPOST /v1/query\n\n\nSubmits a question against the indexed corpus. Accepts a JSON body with a\n\nquestion\n field and an optional \ntop_k\n parameter (default 5). Returns an\n\nanswer\n field along with a \ncitations\n array referencing source chunks.\n\n\nError Codes\n\n\n| Code | Meaning |\n|------|---------|\n| \nTOKEN_EXPIRED\n | The bearer token has passed its 90-day validity window |\n| \nRATE_LIMIT_EXCEEDED\n | Too many requests within the rolling 60-second window |\n| \nDOCUMENT_TOO_LARGE\n | Uploaded file exceeds the 25MB limit |\n| \nUNSUPPORTED_FORMAT\n | File extension is not one of pdf, docx, md, txt, html |",
+        "metadata": {
+            "source": "api-reference.md",
+            "page": null,
+            "section": null,
+            "type": "md"
+        }
+    }
+]

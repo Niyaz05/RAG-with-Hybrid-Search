@@ -1,0 +1,11 @@
+[
+    {
+        "text": "New Engineer Onboarding Guide\n\n\nFirst Week\n\n\nNew engineers on the platform team should complete local environment setup\nusing the \nsetup.sh\n script in the \ninfra\n repository before their first\nday, since it takes roughly 45 minutes to provision local Kubernetes and\nseed sample data.\n\n\nAccess to the production dashboard requires a manager-approved request\nthrough the internal access portal. This typically takes 1-2 business days\nto be granted, so submit the request in your first week rather than waiting\nuntil you need production access.\n\n\nCodebase Orientation\n\n\nThe ingestion pipeline lives in \nservices/ingestion\n, the retrieval and\nreranking service lives in \nservices/retrieval\n, and the generation and\ncitation-verification service lives in \nservices/generation\n. Each service\nhas its own on-call rotation; new engineers join a rotation only after\ncompleting their first 30 days and shadowing at least one incident.\n\n\nWho to Ask\n\n\nFor questions about chunking strategy or embedding model choice, the\nretrieval team owns that decision. For questions about rate limiting or\nAPI authentication, the platform team owns that. For incident response\nprocess questions, refer to the incident runbook first before asking in\nthe on-call channel.",
+        "metadata": {
+            "source": "onboarding-guide.md",
+            "page": null,
+            "section": null,
+            "type": "md"
+        }
+    }
+]

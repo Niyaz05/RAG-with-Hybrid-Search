@@ -1,0 +1,11 @@
+[
+    {
+        "text": "Incident Response Runbook\n\n\nSeverity Levels\n\n\nAperture Cloud classifies incidents into three severity levels.\n\n\nSev1 incidents involve full platform outage or data loss and require paging\nthe on-call engineer immediately, with a status page update within 15\nminutes. Sev2 incidents involve partial degradation, such as elevated error\nrates on the \n/v1/query\n endpoint, and require a status page update within\n1 hour. Sev3 incidents are minor and do not require a public status update.\n\n\nIngestion Pipeline Failures\n\n\nIf document ingestion jobs are failing in bulk, first check the indexing\nqueue depth in the internal dashboard. A queue depth above 5000 pending jobs\ntypically indicates the embedding worker pool has crashed rather than a\ndownstream API issue.\n\n\nRestart the embedding worker pool with:\n\n\nkubectl rollout restart deployment/embedding-worker -n ingestion\n\n\n\nIf failures persist after a restart, check whether the upstream embeddings\nprovider is reporting elevated error rates on their status page. This has\nhistorically been the root cause in 3 of the last 5 ingestion incidents.\n\n\nQuery Latency Spikes\n\n\nElevated p99 latency on \n/v1/query\n is most often caused by the reranker\nstep, not the initial retrieval. Check the reranker service's request queue\nbefore assuming the vector database is the bottleneck — this is a common\nmisdiagnosis during on-call incidents. The vector database has historically\nonly been the root cause in query latency incidents when the queue depth\ndashboard also shows an ingestion backlog at the same time, since bulk\nre-indexing competes for the same compute pool as query-time reranking.\n\n\nRollback Procedure\n\n\nAny deploy causing a Sev1 or Sev2 incident should be rolled back\nimmediately rather than patched forward. Use the deployment dashboard's\n\"Rollback to previous\" button, which reverts to the last known-good image\nwithin roughly 2 minutes.",
+        "metadata": {
+            "source": "incident-runbook.md",
+            "page": null,
+            "section": null,
+            "type": "md"
+        }
+    }
+]
