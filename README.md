@@ -2,7 +2,7 @@
 
 A Hybrid Search Retrieval-Augmented Generation (RAG) system built from scratch to index, search, and answer questions over lecture slide decks using a combination of dense semantic search and sparse keyword retrieval.
 
-The project currently implements a complete, battle-tested slide ingestion and adaptive chunking pipeline with unit and integration tests.
+The project currently implements a complete slide ingestion, adaptive chunking, and dual dense (ChromaDB + Ollama) / sparse (BM25) indexing pipeline with comprehensive unit and integration tests.
 
 ---
 
@@ -14,8 +14,12 @@ flowchart LR
     B --> C["Parsed Pages (data/parsed_pages.json)"]
     C --> D["Adaptive Chunker (ingest/chunk.py)"]
     D --> E["Normalized Chunks (data/chunks.json)"]
-    E -.-> F["Dense Embeddings & BM25 Index (Upcoming)"]
-    F -.-> G["Hybrid Retrieval & LLM (Upcoming)"]
+    E --> F["Dual Indexer (ingest/embed_index.py)"]
+    F --> G["ChromaDB Vector Store (data/chroma_db/)"]
+    F --> H["BM25 Index (data/bm25_index.pkl)"]
+    G -.-> I["Hybrid Retrieval & RRF (Upcoming)"]
+    H -.-> I
+    I -.-> J["LLM Generation & Citations (Upcoming)"]
 ```
 
 ---
@@ -36,9 +40,9 @@ The dataset contains monthly lecture slide decks for **CSET340: Advanced Compute
 
 ---
 
-## Ingestion Pipeline
+## Ingestion & Indexing Pipeline
 
-The ingestion pipeline is designed specifically for presentation slides, respecting slide boundaries and adapting dynamically to content density.
+The pipeline is designed specifically for presentation slides, respecting slide boundaries, adapting dynamically to content density, and indexing chunks across both dense and sparse representations.
 
 ### Step 1: Slide-Aware PDF Parsing (`ingest/parse_pdf.py`)
 
@@ -72,6 +76,19 @@ Slides vary wildly in density—some are minimal title slides, while others cont
   ```
 - **Output**: Writes `data/chunks.json` and outputs summary statistics (min, max, average chunk size).
 
+### Step 3: Dual Indexing — Dense Embeddings & Sparse BM25 (`ingest/embed_index.py`)
+
+To achieve true hybrid search, chunks are indexed into two complementary engines:
+
+- **Dense Semantic Embeddings (ChromaDB + Ollama)**:
+  - Generates 768-dimensional semantic embeddings using local Ollama (`nomic-embed-text`).
+  - Persists vectors, documents, and slide metadata (`source`, `week`, `slide_label`) in ChromaDB (`data/chroma_db/`) under the `cv_course` collection.
+  - Features dependency injection (`EmbedFn`) to decouple the embedding backend and enable fast, deterministic unit testing without requiring an active Ollama instance.
+- **Sparse Lexical Search (BM25Okapi)**:
+  - Tokenizes slide text into normalized lowercase alphanumeric terms via regex.
+  - Computes BM25 corpus statistics using `rank_bm25` for fast, exact keyword retrieval (e.g., matching acronyms, technical terms, and formulas).
+  - Serializes the BM25 index and chunk references to disk (`data/bm25_index.pkl`).
+
 ---
 
 ## Project Structure
@@ -85,14 +102,19 @@ RAG-with-Hybrid-Search/
 │   │   ├── march_2026.pdf
 │   │   └── april_2026.pdf
 │   ├── parsed_pages.json         # Output of parse_pdf.py
-│   └── chunks.json               # Output of chunk.py
+│   ├── chunks.json               # Output of chunk.py
+│   ├── chroma_db/                # Persistent ChromaDB vector store (gitignored)
+│   └── bm25_index.pkl            # Serialized BM25Okapi index & corpus (gitignored)
 ├── ingest/
 │   ├── parse_pdf.py              # Step 1: PDF extraction & cleaning
-│   └── chunk.py                  # Step 2: Slide-aware adaptive chunking
+│   ├── chunk.py                  # Step 2: Slide-aware adaptive chunking
+│   └── embed_index.py            # Step 3: Dense (Chroma) & Sparse (BM25) indexing
 ├── tests/
 │   ├── test_parse_pdf.py         # Unit & integration tests for parser
-│   └── test_chunk.py             # Unit tests for chunking & merge/split rules
+│   ├── test_chunk.py             # Unit tests for chunking & merge/split rules
+│   └── test_embed_index.py       # Unit & integration tests for embeddings & BM25
 ├── requirements.txt              # Project dependencies
+├── .gitignore                    # Ignored virtualenvs, local indexes & OS artifacts
 ├── LICENSE                       # License information
 └── README.md
 ```
@@ -114,36 +136,55 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Run the Ingestion Pipeline
+### 2. Configure Ollama (Local Embeddings)
 
-Execute the two pipeline steps in order:
+Ensure [Ollama](https://ollama.com/) is installed and the embedding model is downloaded:
+
+```bash
+# Start Ollama service (if not already running)
+ollama serve
+
+# Pull the embedding model
+ollama pull nomic-embed-text
+```
+
+### 3. Run the Ingestion & Indexing Pipeline
+
+Execute the pipeline steps in order:
 
 ```bash
 # Step 1: Parse PDFs into parsed_pages.json
-python ingest/parse_pdf.py
+python3 ingest/parse_pdf.py
 
-# Step 2: Build chunks into chunks.json
-python ingest/chunk.py
+# Step 2: Build adaptive chunks into chunks.json
+python3 ingest/chunk.py
+
+# Step 3: Generate ChromaDB vector index and BM25 index
+python3 ingest/embed_index.py
 ```
 
-### 3. Run Tests
+### 4. Run Tests
 
-Run the test suite via `pytest`:
+Run the full test suite via `pytest`:
 
 ```bash
 pytest -v
 ```
 
-Or run individual test suites:
+Or run individual test modules:
 
 ```bash
 pytest tests/test_parse_pdf.py -v
 pytest tests/test_chunk.py -v
+pytest tests/test_embed_index.py -v
 ```
 
-The test suite includes:
-- **Unit tests**: Pure functions (`extract_week_label`, `clean_text`, `split_dense_page`, `build_chunks`) tested in isolation with synthetic test fixtures.
-- **Integration tests**: End-to-end extraction against real PDF files in `data/pdfs/` (safely auto-skipped if PDFs are absent).
+#### Test Architecture
+- **Unit tests**: Pure functions (`extract_week_label`, `clean_text`, `split_dense_page`, `build_chunks`, `tokenize`) tested in isolation.
+- **Dependency-injected tests**: `embed_chunks()` and `build_bm25_index()` tested deterministically with a mock embedding function (no Ollama daemon required, lightning-fast in CI).
+- **Integration tests**: 
+  - Real PDF extraction against `data/pdfs/` (safely auto-skipped if PDFs are missing).
+  - Real Ollama embedding against local daemon (safely auto-skipped if Ollama is unreachable).
 
 ---
 
@@ -151,9 +192,8 @@ The test suite includes:
 
 - [x] **Slide-Aware Ingestion**: Per-page PDF extraction with metadata extraction.
 - [x] **Adaptive Chunking**: Dynamic merging of thin slides and paragraph-aware splitting of dense slides.
-- [x] **Automated Test Suite**: Unit and integration tests covering extraction and chunking edge cases.
-- [ ] **Dense Vector Embeddings**: Generate semantic embeddings for chunks (e.g. using `sentence-transformers` or OpenAI).
-- [ ] **Sparse Keyword Index**: Implement BM25 lexical search (e.g. using `rank-bm25`).
-- [ ] **Vector Store**: Index chunk metadata and embeddings into a vector database.
+- [x] **Dense Vector Store**: ChromaDB persistence with Ollama `nomic-embed-text` embeddings.
+- [x] **Sparse Keyword Index**: Lexical search with BM25Okapi serialized to disk.
+- [x] **Automated Test Suite**: Multi-tier unit and integration tests covering extraction, chunking, and indexing.
 - [ ] **Hybrid Search & Fusion**: Combine dense and sparse candidate lists using Reciprocal Rank Fusion (RRF).
 - [ ] **LLM Generation & Slide Citation**: Ground LLM answers with precise slide citations (e.g., `"April 2026, slides 1-2"`).

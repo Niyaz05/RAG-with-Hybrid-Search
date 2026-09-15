@@ -1,3 +1,36 @@
+# Virtual Environments
 venv/
 .venv/
+env/
+ENV/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 .pytest_cache/
+.coverage
+htmlcov/
+
+# Local Vector Store & Search Indexes
+data/chroma_db/
+data/bm25_index.pkl
+*.pkl
+
+# macOS system files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor & IDE configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment variables
+.env
+.env.local
