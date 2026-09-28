@@ -26,7 +26,7 @@ def tokenize(text: str)->list[str]:
     return re.findall(r"[a-z0-9]+",text.lower())
 
 def embed_text(text: str)->list[float]:
-    #run ollama pull nomic-embed-text in advance
+    #run ollama pull nomic-embed-text in advance and ollama serve in a split terminal
     response = ollama.embeddings(model = EMBED_MODEL, prompt = text)
     return response["embedding"]
 def embed_chunks(chunks: list[dict], embed_fn: EmbedFn) -> dict:
