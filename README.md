@@ -1,8 +1,8 @@
 # Hybrid Search RAG
 
-A Hybrid Search Retrieval-Augmented Generation (RAG) system built from scratch to index, search, and answer questions over lecture slide decks using a combination of dense semantic search, sparse keyword retrieval, Reciprocal Rank Fusion (RRF), and Cross-Encoder semantic reranking.
+A Hybrid Search Retrieval-Augmented Generation (RAG) system built from scratch to index, search, and answer questions over lecture slide decks using a combination of dense semantic search, sparse keyword retrieval, Reciprocal Rank Fusion (RRF), Cross-Encoder semantic reranking, and citation-enforced LLM generation.
 
-The project implements a complete slide ingestion, adaptive chunking, dual dense (ChromaDB + Ollama) / sparse (BM25) indexing, and a two-stage hybrid retrieval pipeline with comprehensive unit and integration tests.
+The project implements a complete slide ingestion, adaptive chunking, dual dense (ChromaDB + Ollama) / sparse (BM25) indexing, a two-stage hybrid retrieval pipeline, citation-verified answer generation via a local LLM (Gemma 4 / Ollama), a retrieval evaluation harness, and comprehensive unit and integration tests throughout.
 
 ---
 
@@ -31,8 +31,18 @@ flowchart TD
         Q -.-> CE
     end
 
-    subgraph Generation ["3. Answer Generation (Upcoming)"]
-        CE -.-> LLM["LLM Synthesis with Slide Citations"]
+    subgraph Generation ["3. Citation-Enforced Answer Generation"]
+        CE --> PR["Prompt Builder (generation/prompt.py)"]
+        PR --> LLM["Gemma 4 via Ollama"]
+        LLM --> VER["Citation Verifier<br/>(checks every cited slide against retrieved chunks)"]
+        VER --> ANS["Answer + valid/invalid citations"]
+    end
+
+    subgraph Evaluation ["4. Retrieval Evaluation"]
+        EQ["eval_questions.json<br/>(question + expected source/slides)"] --> EV["run_eval.py<br/>recall@k per method"]
+        S1 -.-> EV
+        S2 -.-> EV
+        CE -.-> EV
     end
 ```
 
@@ -52,127 +62,102 @@ The dataset contains monthly lecture slide decks for **CSET340: Advanced Compute
 > [!NOTE]
 > Instead of fragile, hand-maintained lookup tables, date ranges are dynamically parsed directly from each deck's cover slide text via regex (`extract_week_label`), with graceful fallback to sanitized filenames (`week_label_for`).
 
+> [!WARNING]
+> `april_2026.pdf` actually spans **two** course weeks (6-10 April and 13-17 April), each with its own cover slide. `extract_week_label` currently reads only page 1's date range and applies it to the whole file, so slides from the second week are mislabeled as `6-10 April 2026`. Tracked as a known issue, to be fixed before the ingestion layer is considered final.
+
 ---
 
 ## Ingestion & Indexing Pipeline
 
-The pipeline is designed specifically for presentation slides, respecting slide boundaries, adapting dynamically to content density, and indexing chunks across both dense and sparse representations.
+*(Steps 1-3 unchanged from the ingestion stage — see inline docstrings in `ingest/` for full detail.)*
 
 ### Step 1: Slide-Aware PDF Parsing (`ingest/parse_pdf.py`)
-
-- **Per-Slide Extraction**: Uses [PyMuPDF](https://pymupdf.readthedocs.io/) (`pymupdf`) to extract selectable text page-by-page, preserving natural topic and slide boundaries.
-- **Dynamic Metadata Derivation**: Automatically pulls course dates from slide 1 content.
-- **Text Normalization**: 
-  - Collapses runs of spaces and horizontal tabs.
-  - Normalizes 3+ newlines into `\n\n` (preserving double-newlines as downstream paragraph delimiters).
-  - Skips near-empty or image-only slides (< 5 characters) to prevent noise.
-- **Output**: Writes `data/parsed_pages.json` with records containing `{source, week, slide, text}`.
+Per-slide text extraction via PyMuPDF, dynamic week-label derivation from cover-slide text, whitespace normalization, near-empty slide skipping. Outputs `data/parsed_pages.json`.
 
 ### Step 2: Adaptive Slide Chunking (`ingest/chunk.py`)
-
-Slides vary wildly in density—some are minimal title slides, while others contain dense mathematical explanations. The chunker adapts to both:
-
-- **Adaptive Merging for Thin Slides (`MIN_CHARS = 120`)**:
-  - Slides with fewer than 120 characters (such as title or section transition slides) are buffered and merged forward with subsequent slides from the same PDF (e.g., labeled `slides 1-2`).
-  - Strict document-boundary check ensures slides are **never** merged across different PDFs.
-- **Adaptive Splitting for Dense Slides (`MAX_CHARS = 1400`)**:
-  - Slides exceeding 1400 characters are greedily split across `\n\n` paragraph boundaries.
-  - Fallback window-slicing handles oversized paragraphs lacking newline breaks.
-- **Normalized Schema**:
-  ```json
-  {
-    "chunk_id": "c0001",
-    "source": "april_2026.pdf",
-    "week": "6-10 April 2026",
-    "slide_label": "slides 1-2",
-    "text": "..."
-  }
-  ```
-- **Output**: Writes `data/chunks.json` and outputs summary statistics (min, max, average chunk size).
+Merges thin slides (< `MIN_CHARS = 120`) forward into the next slide from the same PDF; splits dense slides (> `MAX_CHARS = 1400`) on paragraph boundaries, with a hard character-split fallback for oversized single paragraphs. Outputs `data/chunks.json`.
 
 ### Step 3: Dual Indexing — Dense Embeddings & Sparse BM25 (`ingest/embed_index.py`)
-
-To achieve true hybrid search, chunks are indexed into two complementary engines:
-
-- **Dense Semantic Embeddings (ChromaDB + Ollama)**:
-  - Generates 768-dimensional semantic embeddings using local Ollama (`nomic-embed-text`).
-  - Persists vectors, documents, and slide metadata (`source`, `week`, `slide_label`) in ChromaDB (`data/chroma_db/`) under the `cv_course` collection.
-  - Features dependency injection (`EmbedFn`) to decouple the embedding backend and enable fast, deterministic unit testing without requiring an active Ollama instance.
-- **Sparse Lexical Search (BM25Okapi)**:
-  - Tokenizes slide text into normalized lowercase alphanumeric terms via regex.
-  - Computes BM25 corpus statistics using `rank_bm25` for fast, exact keyword retrieval (e.g., matching acronyms, technical terms, and formulas).
-  - Serializes the BM25 index and chunk references to disk (`data/bm25_index.pkl`).
+Builds a ChromaDB vector index (768-dim `nomic-embed-text` embeddings via Ollama) and a parallel BM25Okapi keyword index, both keyed by the same `chunk_id`. Uses dependency injection (`EmbedFn`) so indexing logic is unit-testable without a live Ollama instance.
 
 ---
 
 ## Hybrid Retrieval & Reranking Pipeline
 
-Pure lexical search (BM25) fails when users use synonyms or conceptual descriptions, while pure vector search often misses precise keywords, domain acronyms (e.g., `CLAHE`), or mathematical notation. Our hybrid pipeline bridges this gap using a two-stage retrieval and reranking strategy.
+*(Steps 4-7 unchanged — full detail in `retrieval/` docstrings.)*
 
-```text
-                  USER QUERY
-                      │
-           "What is camera calibration?"
-                      │
-             ┌────────┴────────┐
-             ↓                 ↓
-        BM25 Search       Vector Search       (Stage 1: Candidate Generation)
-        (Top 20 IDs)      (Top 20 IDs)
-             │                 │
-             └────────┬────────┘
-                      ↓
-           Reciprocal Rank Fusion (RRF)       (Stage 2: Rank-Based Fusion)
-                      ↓
-                 Top 10 Chunks
-                      ↓
-             Cross-Encoder Reranker           (Stage 3: Deep Relevance Scoring)
-       (ms-marco-MiniLM-L-6-v2)
-                      ↓
-             Top 5 Final Chunks               (Context for LLM Answer Generation)
-```
+Pure lexical search (BM25) fails on synonyms/conceptual phrasing; pure vector search often misses precise keywords, acronyms (`CLAHE`), or notation (`fx`, `fy`). The two-stage pipeline (BM25 top-20 + vector top-20 → RRF fusion → top-10 → cross-encoder rerank → top-5) bridges this gap.
 
 ### Step 4: First-Stage Candidate Retrieval (`retrieval/search.py`)
-
-- **Sparse BM25 Search (`search_bm25`)**: Tokenizes the input query, scores chunks against precomputed term frequencies, and retrieves the top 20 candidate chunk IDs.
-- **Dense Vector Search (`search_vector`)**: Embeds the query using `nomic-embed-text` via Ollama and queries the ChromaDB collection for nearest neighbors via cosine distance, retrieving the top 20 candidate chunk IDs.
-- **Index Loaders**: Clean loader helpers (`load_bm25_index`, `load_vector_index`) abstract disk serialization details.
-
 ### Step 5: Reciprocal Rank Fusion (`retrieval/fuse.py`)
-
-#### The Problem RRF Solves
-BM25 scores and cosine-similarity scores live on completely different, incompatible scales:
-- BM25 scores are unbounded and corpus-dependent (e.g., a score of `14.2` has no inherent scale).
-- Cosine similarity is bounded $[-1, 1]$.
-
-Direct score normalization or weighted sums are fragile and skewed by outliers. 
-
-#### RRF Algorithm
-Reciprocal Rank Fusion discards arbitrary raw scores and operates strictly on **rank positions**:
 
 $$\text{RRF Score}(d) = \sum_{m \in M} \frac{1}{k + r_m(d)}$$
 
-- $r_m(d)$ is the 1-based rank position of chunk $d$ in system $m$.
-- If a chunk was not retrieved by a method, its contribution from that method is 0.
-- $k$ is a smoothing constant (default: `60`) that controls the score drop-off between adjacent ranks.
-- Chunks discovered by **both** BM25 and vector search receive additive score boosts, naturally surfacing consensus results.
-- **Output**: Returns the top 10 fused candidate chunk IDs (`fuse_top_k`).
+Fuses on rank position (not raw score) so BM25's unbounded scores and vector search's bounded cosine similarities never need to be reconciled directly.
 
 ### Step 6: Cross-Encoder Semantic Reranking (`retrieval/rerank.py`)
-
-Bi-encoders (like the embedding model used in vector search) compute representations for the query and document independently, missing fine-grained token-level cross-attention.
-
-- **Cross-Encoder Model**: Uses `cross-encoder/ms-marco-MiniLM-L-6-v2` via `sentence-transformers`.
-- **Full Joint Attention**: Feeds `(query, document_text)` pairs simultaneously into the transformer, capturing word order, negation, syntactic dependencies, and nuance.
-- **Relevance Scoring**: Reranks the top 10 candidates by predicted logit scores and selects the top 5 highest-quality chunks.
-- **Metadata Preservation**: Retains complete chunk objects (`chunk_id`, `source`, `week`, `slide_label`, `text`) for downstream citation generation.
+`cross-encoder/ms-marco-MiniLM-L-6-v2` jointly scores `(query, document)` pairs — full cross-attention, too expensive to run on the whole corpus, cheap enough on the fused top-10.
 
 ### Step 7: End-to-End Hybrid Orchestrator & Diagnostics (`retrieval/hybrid_retrieve.py`)
+`retrieve()` chains all of the above; `compare_methods()` prints BM25-only / vector-only / fused+reranked side by side for manual inspection.
 
-- **Unified Interface (`retrieve`)**: Orchestrates dual retrieval $\rightarrow$ RRF $\rightarrow$ Cross-Encoder reranking in a single callable.
-- **Side-by-Side Comparison (`compare_methods`)**: Diagnostic harness that runs queries across three modes simultaneously:
-  1. BM25 only (top 3)
-  2. Vector search only (top 3)
-  3. Fused + Cross-Encoder reranked (top 3)
+---
+
+## Citation-Enforced Answer Generation (`generation/prompt.py`)
+
+Retrieval alone doesn't answer a question — a local LLM (**Gemma 4**, via Ollama) synthesizes the final answer from the top-5 reranked chunks, under an explicit grounding contract, with the output **verified in code**, not just requested in the prompt.
+
+### Prompting Rules
+The system prompt requires the model to:
+1. Use only the provided slide excerpts — no outside knowledge.
+2. Cite every claim in the exact format `[source_file.pdf, slide N]`, copied verbatim from the excerpt header.
+3. Reply with a fixed refusal string if the excerpts don't cover the question.
+
+### Citation Verification (`verify_citations`)
+Prompting reduces hallucinated citations but cannot guarantee their absence — a fluent model can still fabricate a plausible-looking `[source, slide]` tag. So every citation the model outputs is parsed via regex and checked against the chunks *actually retrieved* for that query:
+- **Valid**: source file matches a retrieved chunk AND the cited slide number overlaps that chunk's `slide_label` (handles merged ranges like `slides 1-2` correctly via set intersection, not string equality).
+- **Invalid**: anything else — flagged, not silently trusted.
+
+If retrieval returns zero chunks, the system refuses **without calling the model at all** — cheaper, and impossible to hallucinate from no context.
+
+### Example (real output, Gemma 4 via Ollama)
+
+```
+Q: Why do we need two different focal lengths fx and fy?
+
+A: You use different focal lengths ($F_x$ and $F_y$) in order to accommodate
+non-equal pixel density in the x and y directions [april_2026.pdf, slide 7].
+This is necessary if the pixels are rectangular [april_2026.pdf, slide 7].
+
+valid:   [('april_2026.pdf', 'slide 7'), ('april_2026.pdf', 'slide 7')]
+invalid: []
+```
+
+Both citations verified against the actually-retrieved chunk — zero invalid citations on this query.
+
+---
+
+## Retrieval Evaluation Harness (`eval/run_eval.py`)
+
+Citation verification checks *generation* faithfulness; it says nothing about whether retrieval found the *right* slide in the first place. The eval harness measures that separately via **recall@k**: for each question in `eval/eval_questions.json` (with a hand-labeled expected source PDF + slide numbers), is a chunk from the expected slide anywhere in the top-k results?
+
+```bash
+python3 eval/run_eval.py
+```
+
+Reports recall@5 for BM25-only, vector-only, and hybrid+rerank side by side, so a pipeline change (chunk size, RRF's `k`, rerank cutoff) can be checked for regressions before being trusted.
+
+> [!WARNING]
+> **Current result on the initial 10-question set: all three methods score 100% recall@5.** This does **not** mean hybrid search is proven superior — it means the current eval set is too easy to discriminate between methods (every question's phrasing is close enough to the source slide's wording that any single method finds it). The set needs harder, more paraphrased questions — and coverage across all four PDFs, not just April — before recall@5 numbers are meaningful for comparing methods or reporting externally. Tracked as a follow-up before these numbers go anywhere near a resume.
+
+`eval_questions.json` format:
+```json
+{
+  "question": "Why do we use different focal lengths fx and fy?",
+  "expected_source": "april_2026.pdf",
+  "expected_slides": [7]
+}
+```
 
 ---
 
@@ -199,13 +184,20 @@ RAG-with-Hybrid-Search/
 │   ├── fuse.py                   # Step 5: Reciprocal Rank Fusion (RRF)
 │   ├── rerank.py                 # Step 6: Cross-Encoder semantic reranker
 │   └── hybrid_retrieve.py        # Step 7: End-to-end pipeline & comparison runner
+├── generation/
+│   └── prompt.py                 # Citation-enforced prompt building, generation, verification
+├── eval/
+│   ├── eval_questions.json       # Hand-labeled question -> expected source/slides
+│   └── run_eval.py               # recall@k evaluation across BM25/vector/hybrid
 ├── tests/
 │   ├── test_parse_pdf.py         # Unit & integration tests for parser
 │   ├── test_chunk.py             # Unit tests for chunking & merge/split rules
 │   ├── test_embed_index.py       # Unit & integration tests for embeddings & BM25
 │   ├── test_search.py            # Unit tests for BM25 and vector search
 │   ├── test_fuse.py              # Unit tests for RRF algorithm & properties
-│   └── test_rerank.py            # Unit & integration tests for cross-encoder reranker
+│   ├── test_rerank.py            # Unit & integration tests for cross-encoder reranker
+│   ├── test_prompt.py            # Unit tests for prompt building & citation verification
+│   └── test_eval.py              # Unit tests for the recall@k metric itself
 ├── requirements.txt              # Project dependencies
 ├── .gitignore                    # Ignored virtualenvs, local indexes & OS artifacts
 ├── LICENSE                       # License information
@@ -218,80 +210,62 @@ RAG-with-Hybrid-Search/
 
 ### 1. Environment & Dependencies
 
-Create a virtual environment and install the required dependencies:
-
 ```bash
-# Create and activate virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Configure Ollama (Local Embeddings)
-
-Ensure [Ollama](https://ollama.com/) is installed and running with the embedding model:
+### 2. Configure Ollama (Local Embeddings + Generation)
 
 ```bash
-# Start Ollama service (in a split terminal if not running as a system service)
 ollama serve
-
-# Pull the embedding model
 ollama pull nomic-embed-text
+ollama pull gemma4
 ```
 
 ### 3. Run the Ingestion & Indexing Pipeline
 
-Execute the ingestion and indexing stages in order:
-
 ```bash
-# Step 1: Parse PDFs into parsed_pages.json
 python3 ingest/parse_pdf.py
-
-# Step 2: Build adaptive chunks into chunks.json
 python3 ingest/chunk.py
-
-# Step 3: Generate ChromaDB vector index and BM25 index
 python3 ingest/embed_index.py
 ```
 
-### 4. Run Hybrid Retrieval
-
-Run the end-to-end hybrid retrieval demo to see side-by-side comparisons of BM25, Vector Search, and Fused + Reranked results across test queries:
+### 4. Run Hybrid Retrieval (diagnostics)
 
 ```bash
 python3 retrieval/hybrid_retrieve.py
 ```
 
-Sample output:
-```text
-======================================================================
-QUERY : What is the extrinsic matrix of a camera?
-======================================================================
+### 5. Generate a Citation-Verified Answer
 
---- BM25 only (top 3) ---
- [capril_2026.pdf, slides 19-20] Camera Calibration...
- [capril_2026.pdf, slide 11] Camera Calibration Extrinsic parameter...
-
---- Vector only (top 3) ---
-  [april_2026.pdf, slides 14-15] Camera Calibration...
-  [april_2026.pdf, slide 11] Camera Calibration Extrinsic parameter...
-
---- Fused + reranked (top 3) ---
-  [april_2026.pdf, slide 11] Camera Calibration Extrinsic parameter...
-  [april_2026.pdf, slides 14-15] Camera Calibration...
+```bash
+python3 -c "
+import sys; sys.path.insert(0,'generation'); sys.path.insert(0,'retrieval'); sys.path.insert(0,'ingest')
+from prompt import generate_answer, ollama_chat
+from search import load_bm25_index, load_vector_index
+from hybrid_retrieve import retrieve, build_chunk_lookup
+bm25, chunks = load_bm25_index(); col = load_vector_index(); lk = build_chunk_lookup(chunks)
+q = 'Why do we need two different focal lengths fx and fy?'
+r = generate_answer(q, retrieve(q, bm25, chunks, col, lk), ollama_chat)
+print(r['answer']); print('valid:', r['citations_valid']); print('invalid:', r['citations_invalid'])
+"
 ```
 
-### 5. Run Tests
+### 6. Run the Retrieval Evaluation Harness
 
-Run the full test suite via `pytest`:
+```bash
+python3 eval/run_eval.py
+```
+
+### 7. Run Tests
 
 ```bash
 pytest -v
 ```
 
-Or run individual test suites:
+Or individually:
 
 ```bash
 pytest tests/test_parse_pdf.py -v
@@ -300,21 +274,14 @@ pytest tests/test_embed_index.py -v
 pytest tests/test_search.py -v
 pytest tests/test_fuse.py -v
 pytest tests/test_rerank.py -v
+pytest tests/test_prompt.py -v
+pytest tests/test_eval.py -v
 ```
 
-#### Test Architecture (37 tests)
-- **Pure Unit Tests**: Fast, deterministic logic testing without network, disk, or model dependencies:
-  - Text cleaning and regex date extraction (`test_parse_pdf.py`)
-  - Adaptive sliding window merging and paragraph splitting (`test_chunk.py`)
-  - Regex tokenization (`test_embed_index.py`)
-  - Reciprocal Rank Fusion properties, rank sensitivities, and damping parameter $k$ (`test_fuse.py`)
-- **Dependency-Injected Tests**:
-  - `embed_chunks()` and `search_vector()` tested with a deterministic fake embedding function and ephemeral ChromaDB (`test_embed_index.py`, `test_search.py`).
-  - `rerank()` tested with a deterministic fake word-overlap scorer (`test_rerank.py`).
-- **Graceful Integration Tests**:
-  - Real PDF parsing against `data/pdfs/` (auto-skipped if PDFs are missing).
-  - Real Ollama embedding against local daemon (auto-skipped if Ollama is unreachable).
-  - Real Cross-Encoder scoring (`cross-encoder/ms-marco-MiniLM-L-6-v2`) against sample queries (auto-skipped if model download is unavailable).
+#### Test Architecture (53 tests)
+- **Pure Unit Tests**: Fast, deterministic logic testing without network, disk, or model dependencies — text cleaning/date regex, adaptive chunk merge/split, tokenization, RRF properties, citation regex parsing, slide-range overlap checks, and the recall@k metric itself (`test_eval.py` proves the metric is correct independent of any real retriever).
+- **Dependency-Injected Tests**: `embed_chunks()`/`search_vector()` with a fake embedding function + ephemeral ChromaDB; `rerank()` with a fake word-overlap scorer; `generate_answer()` with a fake `chat_fn` — proving citation verification logic without ever calling Ollama.
+- **Graceful Integration Tests**: real PDF parsing, real Ollama embedding, real cross-encoder scoring — each auto-skipped if its dependency (PDFs on disk / Ollama daemon / model download) isn't available.
 
 ---
 
@@ -326,6 +293,12 @@ pytest tests/test_rerank.py -v
 - [x] **Sparse Keyword Index**: Lexical search with BM25Okapi serialized to disk.
 - [x] **Two-Stage Hybrid Search**: Reciprocal Rank Fusion (RRF) combining dense and sparse candidate pools.
 - [x] **Cross-Encoder Reranking**: Re-scoring top candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`.
-- [x] **Automated Test Suite**: 37 comprehensive unit and integration tests across all pipeline modules.
-- [ ] **LLM Generation & Slide Citation**: Ground LLM answers with precise slide citations (e.g., `"April 2026, slides 1-2"`).
-- [ ] **Evaluation Harness**: Retrieval benchmarking with Mean Reciprocal Rank (MRR) and Hit Rate@K.
+- [x] **Citation-Enforced Generation**: Gemma 4 (Ollama) answers grounded in retrieved slides, with code-level citation verification against retrieved chunk IDs.
+- [x] **Evaluation Harness**: recall@k across BM25-only, vector-only, and hybrid+rerank.
+- [x] **Automated Test Suite**: 53 unit and integration tests across all pipeline modules.
+- [ ] **Expand eval set**: grow past 10 questions, cover all four PDFs, include paraphrased (non-exact-wording) questions so recall@5 can actually discriminate between methods.
+- [ ] **Fix April week-label bug**: `extract_week_label` needs to detect and label the second cover slide (13-17 April) separately.
+- [ ] **Auth & Backend (FastAPI)**: JWT-based auth with admin/student roles.
+- [ ] **Chat History**: Per-user persisted sessions and messages (SQLite).
+- [ ] **Document Ingestion API**: Admin-gated endpoint to upload and re-index new PDFs.
+- [ ] **Frontend**: Streamlit client (login, chat, history, admin upload) as a pure API consumer.
