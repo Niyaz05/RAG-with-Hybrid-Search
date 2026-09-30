@@ -1,0 +1,91 @@
+[
+    {
+        "question": "Explain Harris Corner Detection",
+        "expected_source": "feb_2026.pdf",
+        "expected_slides": [
+            94,
+            95,
+            96,
+            97,
+            98
+        ]
+    },
+    {
+        "question": "What are homogeneous coordinates and why are they useful?",
+        "expected_source": "april_2026.pdf",
+        "expected_slides": [
+            8
+        ]
+    },
+    {
+        "question": "What does the extrinsic matrix describe?",
+        "expected_source": "april_2026.pdf",
+        "expected_slides": [
+            11,
+            13
+        ]
+    },
+    {
+        "question": "What is an orthonormal matrix?",
+        "expected_source": "april_2026.pdf",
+        "expected_slides": [
+            11
+        ]
+    },
+    {
+        "question": "Explain Adjacency, Connectivity, Region and Boundaries",
+        "expected_source": "jan_2026.pdf",
+        "expected_slides": [
+            32,
+            33,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39
+        ]
+    },
+    {
+        "question": "How are the intrinsic and extrinsic parameters separated from the projection matrix?",
+        "expected_source": "april_2026.pdf",
+        "expected_slides": [
+            20
+        ]
+    },
+    {
+        "question": "What are the steps of CLAHE?",
+        "expected_source": "april_2026.pdf",
+        "expected_slides": [
+            28,
+            29
+        ]
+    },
+    {
+        "question": "How does skew correction work in OCR preprocessing?",
+        "expected_source": "april_2026.pdf",
+        "expected_slides": [
+            30,
+            31
+        ]
+    },
+    {
+        "question": "Explain Sobel Edge Detector",
+        "expected_source": "feb_2026.pdf",
+        "expected_slides": [
+            61,
+            62,
+            63,
+            64,
+            65,
+            66
+        ]
+    },
+    {
+        "question": "What is Homography",
+        "expected_source": "march_2026.pdf",
+        "expected_slides": [
+            16
+        ]
+    }
+]
