@@ -1,8 +1,8 @@
 # Hybrid Search RAG
 
-A Hybrid Search Retrieval-Augmented Generation (RAG) system built from scratch to index, search, and answer questions over lecture slide decks using a combination of dense semantic search, sparse keyword retrieval, Reciprocal Rank Fusion (RRF), Cross-Encoder semantic reranking, and citation-enforced LLM generation.
+A Hybrid Search Retrieval-Augmented Generation (RAG) system built from scratch to index, search, and answer questions over lecture slide decks using a combination of dense semantic search, sparse keyword retrieval, Reciprocal Rank Fusion (RRF), Cross-Encoder semantic reranking, and citation-enforced LLM generation, served through an authenticated FastAPI backend with persistent per-user chat history.
 
-The project implements a complete slide ingestion, adaptive chunking, dual dense (ChromaDB + Ollama) / sparse (BM25) indexing, a two-stage hybrid retrieval pipeline, citation-verified answer generation via a local LLM (Gemma 4 / Ollama), a retrieval evaluation harness, and comprehensive unit and integration tests throughout.
+The project implements a complete slide ingestion, adaptive chunking, dual dense (ChromaDB + Ollama) / sparse (BM25) indexing, a two-stage hybrid retrieval pipeline, citation-verified answer generation via a local LLM (Gemma 4 / Ollama), a retrieval evaluation harness, a JWT-secured REST API with role-based access control and SQLite-backed chat history, and comprehensive unit and integration tests throughout.
 
 ---
 
@@ -43,6 +43,15 @@ flowchart TD
         S1 -.-> EV
         S2 -.-> EV
         CE -.-> EV
+    end
+
+    subgraph Backend ["5. FastAPI Backend (Auth + Chat History)"]
+        CL["Client"] -->|"POST /auth/login"| AUTH["JWT Auth<br/>backend/auth.py"]
+        CL -->|"POST /chat + Bearer token"| CHAT["Chat Route<br/>backend/routes/chat_routes.py"]
+        AUTH --> CHAT
+        CHAT -->|"answer_fn (injected)"| Q
+        ANS --> CHAT
+        CHAT --> DB[("SQLite (data/app.db)<br/>users, chat_sessions, messages")]
     end
 ```
 
@@ -161,6 +170,66 @@ Reports recall@5 for BM25-only, vector-only, and hybrid+rerank side by side, so 
 
 ---
 
+## Backend API: Authentication & Chat History (`backend/`)
+
+The retrieval and generation pipeline is exposed through a FastAPI backend so that identity, access control, and conversation history live behind a real API rather than inside a script. Clients (a CLI, a Streamlit app, anything that speaks HTTP) never touch Chroma, BM25, or Ollama directly.
+
+### Data Model (`backend/db.py`, SQLModel + SQLite)
+
+```text
+users (id, email UNIQUE, hashed_password, role, created_at)
+   └── chat_sessions (id, user_id → users.id, title, created_at)
+          └── messages (id, session_id → chat_sessions.id, role, content,
+                        citations_json, created_at)
+```
+
+- **`role`** is `student` or `admin`. Registration **always** creates a `student`; promotion to `admin` is a deliberate manual step, so nobody can grant themselves access to destructive operations at signup.
+- **Citations are stored per message** as a JSON list of `[source, slide_label]` pairs, so a past answer can be revisited along with exactly which slides backed it.
+- SQLite keeps setup at zero. Migrating to Postgres is a connection-string change, since the table definitions are identical.
+
+### Authentication (`backend/auth.py`)
+
+- **Password hashing**: bcrypt via `passlib` — one-way, salted per password (hashing the same password twice yields different strings, both of which verify), deliberately slow to resist brute force.
+- **JWT access tokens** (`python-jose`, HS256): stateless — the server verifies the signature instead of looking up a session. Tokens carry the user's email (`sub`) and role, and expire after 24 hours.
+- **`get_current_user`**: a FastAPI dependency that validates the bearer token and loads the user. Any route that declares it becomes "login required".
+- **`require_admin`**: stacks on top of `get_current_user` and rejects non-admins with `403`. Reserved for the document-ingestion endpoint, since re-indexing is expensive and destructive.
+- The signing key is read from the `JWT_SECRET_KEY` environment variable. The built-in fallback is for local development only.
+
+### Endpoints
+
+| Method | Path | Auth | Description |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/auth/register` | none | Create a `student` account |
+| `POST` | `/auth/login` | none | Exchange email + password for a JWT (OAuth2 password form) |
+| `POST` | `/chat` | user | Ask a question; returns the cited answer, persists both turns to a session |
+| `GET` | `/sessions` | user | List the current user's chat sessions, newest first |
+| `GET` | `/sessions/{id}` | user | Full message history of one session, with citations |
+
+`POST /chat` accepts `{"message": "...", "session_id": 3}`. Omit `session_id` to start a new session; include it to continue one. Interactive docs are auto-generated at `/docs`.
+
+### Access-Control Details
+
+- A user can only read or continue **their own** sessions. Requesting another user's session returns `404`, not `403`: a `403` would confirm the session exists, a `404` reveals nothing.
+- Unauthenticated requests to any protected route return `401`.
+
+### Testability: dependency injection through FastAPI
+
+The real answer function (`retrieve()` + `generate_answer()`) needs Ollama, so `/chat` receives it as an injected dependency (`get_answer_fn`). Tests replace it with a fake through `app.dependency_overrides`, and replace the database session with an isolated in-memory SQLite engine. As a result the whole API — registration, login, token validation, chat persistence, cross-user isolation — is tested without Ollama and without touching the real `data/app.db`.
+
+> [!NOTE]
+> **bcrypt pin.** `passlib` 1.7.4 (last released 2020) probes an internal `bcrypt.__about__` attribute that newer `bcrypt` releases removed. The mismatch makes every password check fail with a misleading "password cannot be longer than 72 bytes" error. `requirements.txt` therefore pins `bcrypt==4.0.1`.
+
+> [!NOTE]
+> **Python version.** The code is written to run on Python 3.9 (`Optional[...]` rather than `X | None`). Python 3.10+ is recommended.
+
+### Known Limitations
+
+- **JWTs cannot be revoked individually** before they expire; that would need a token blocklist.
+- **`get_answer_fn` reloads the BM25 and Chroma indexes on every `/chat` request.** It should be cached so the indexes load once per server process.
+- The index is **shared** across all users; there is no per-user document access control yet.
+
+---
+
 ## Project Structure
 
 ```text
@@ -174,7 +243,8 @@ RAG-with-Hybrid-Search/
 │   ├── parsed_pages.json         # Output of parse_pdf.py
 │   ├── chunks.json               # Output of chunk.py
 │   ├── chroma_db/                # Persistent ChromaDB vector store (gitignored)
-│   └── bm25_index.pkl            # Serialized BM25Okapi index & corpus (gitignored)
+│   ├── bm25_index.pkl            # Serialized BM25Okapi index & corpus (gitignored)
+│   └── app.db                    # SQLite: users, sessions, messages (gitignored)
 ├── ingest/
 │   ├── parse_pdf.py              # Step 1: PDF extraction & cleaning
 │   ├── chunk.py                  # Step 2: Slide-aware adaptive chunking
@@ -189,6 +259,14 @@ RAG-with-Hybrid-Search/
 ├── eval/
 │   ├── eval_questions.json       # Hand-labeled question -> expected source/slides
 │   └── run_eval.py               # recall@k evaluation across BM25/vector/hybrid
+├── backend/
+│   ├── main.py                   # FastAPI app + startup (creates tables)
+│   ├── db.py                     # SQLModel tables, engine, session dependency
+│   ├── auth.py                   # Password hashing, JWT, get_current_user, require_admin
+│   └── routes/
+│       ├── __init__.py
+│       ├── auth_routes.py        # POST /auth/register, /auth/login
+│       └── chat_routes.py        # POST /chat, GET /sessions, GET /sessions/{id}
 ├── tests/
 │   ├── test_parse_pdf.py         # Unit & integration tests for parser
 │   ├── test_chunk.py             # Unit tests for chunking & merge/split rules
@@ -197,9 +275,11 @@ RAG-with-Hybrid-Search/
 │   ├── test_fuse.py              # Unit tests for RRF algorithm & properties
 │   ├── test_rerank.py            # Unit & integration tests for cross-encoder reranker
 │   ├── test_prompt.py            # Unit tests for prompt building & citation verification
-│   └── test_eval.py              # Unit tests for the recall@k metric itself
+│   ├── test_eval.py              # Unit tests for the recall@k metric itself
+│   ├── test_auth.py              # Unit tests for password hashing & JWT handling
+│   └── test_api.py               # API integration tests (auth, chat, sessions, isolation)
 ├── requirements.txt              # Project dependencies
-├── .gitignore                    # Ignored virtualenvs, local indexes & OS artifacts
+├── .gitignore                    # Ignored virtualenvs, local indexes, app.db & OS artifacts
 ├── LICENSE                       # License information
 └── README.md
 ```
@@ -259,7 +339,23 @@ print(r['answer']); print('valid:', r['citations_valid']); print('invalid:', r['
 python3 eval/run_eval.py
 ```
 
-### 7. Run Tests
+### 7. Start the API Server
+
+```bash
+export JWT_SECRET_KEY="replace-with-a-long-random-string"
+cd backend
+uvicorn main:app --reload
+```
+
+Open http://127.0.0.1:8000/docs for the interactive API docs. Register, click **Authorize**, log in, then try `POST /chat`. This path needs Ollama running, because `/chat` calls the real retrieval and generation pipeline.
+
+To promote an account to admin (required later for document upload), edit the database directly:
+
+```bash
+sqlite3 data/app.db "UPDATE user SET role='admin' WHERE email='you@example.com';"
+```
+
+### 8. Run Tests
 
 ```bash
 pytest -v
@@ -276,11 +372,14 @@ pytest tests/test_fuse.py -v
 pytest tests/test_rerank.py -v
 pytest tests/test_prompt.py -v
 pytest tests/test_eval.py -v
+pytest tests/test_auth.py -v
+pytest tests/test_api.py -v
 ```
 
-#### Test Architecture (53 tests)
-- **Pure Unit Tests**: Fast, deterministic logic testing without network, disk, or model dependencies — text cleaning/date regex, adaptive chunk merge/split, tokenization, RRF properties, citation regex parsing, slide-range overlap checks, and the recall@k metric itself (`test_eval.py` proves the metric is correct independent of any real retriever).
-- **Dependency-Injected Tests**: `embed_chunks()`/`search_vector()` with a fake embedding function + ephemeral ChromaDB; `rerank()` with a fake word-overlap scorer; `generate_answer()` with a fake `chat_fn` — proving citation verification logic without ever calling Ollama.
+#### Test Architecture (72 tests)
+- **Pure Unit Tests**: Fast, deterministic logic testing without network, disk, or model dependencies — text cleaning/date regex, adaptive chunk merge/split, tokenization, RRF properties, citation regex parsing, slide-range overlap checks, the recall@k metric itself, bcrypt hashing (salting, verification), and JWT creation, tamper detection and expiry.
+- **Dependency-Injected Tests**: `embed_chunks()`/`search_vector()` with a fake embedding function + ephemeral ChromaDB; `rerank()` with a fake word-overlap scorer; `generate_answer()` with a fake `chat_fn`; and the whole FastAPI app with an in-memory SQLite database plus a fake `answer_fn` via `dependency_overrides`.
+- **API Integration Tests** (`test_api.py`): registration defaults and duplicate rejection, login success/failure, `401` on protected routes without a token, session creation and reuse, ordered message history with citations, and cross-user session isolation.
 - **Graceful Integration Tests**: real PDF parsing, real Ollama embedding, real cross-encoder scoring — each auto-skipped if its dependency (PDFs on disk / Ollama daemon / model download) isn't available.
 
 ---
@@ -295,10 +394,11 @@ pytest tests/test_eval.py -v
 - [x] **Cross-Encoder Reranking**: Re-scoring top candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`.
 - [x] **Citation-Enforced Generation**: Gemma 4 (Ollama) answers grounded in retrieved slides, with code-level citation verification against retrieved chunk IDs.
 - [x] **Evaluation Harness**: recall@k across BM25-only, vector-only, and hybrid+rerank.
-- [x] **Automated Test Suite**: 53 unit and integration tests across all pipeline modules.
+- [x] **Auth & Backend (FastAPI)**: JWT-based auth with student/admin roles, bcrypt password hashing, `require_admin` dependency.
+- [x] **Chat History**: Per-user persisted sessions and messages (SQLite), with per-message citations and cross-user isolation.
+- [x] **Automated Test Suite**: 72 unit and integration tests across all pipeline and API modules.
+- [ ] **Cache index loading**: load BM25/Chroma once per server process instead of on every `/chat` request.
 - [ ] **Expand eval set**: grow past 10 questions, cover all four PDFs, include paraphrased (non-exact-wording) questions so recall@5 can actually discriminate between methods.
 - [ ] **Fix April week-label bug**: `extract_week_label` needs to detect and label the second cover slide (13-17 April) separately.
-- [ ] **Auth & Backend (FastAPI)**: JWT-based auth with admin/student roles.
-- [ ] **Chat History**: Per-user persisted sessions and messages (SQLite).
-- [ ] **Document Ingestion API**: Admin-gated endpoint to upload and re-index new PDFs.
+- [ ] **Document Ingestion API**: Admin-gated (`require_admin`) endpoint to upload and re-index new PDFs.
 - [ ] **Frontend**: Streamlit client (login, chat, history, admin upload) as a pure API consumer.
