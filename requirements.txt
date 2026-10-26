@@ -1,6 +1,29 @@
-pymupdf>=1.26.0
-pytest>=8.0.0
-chromadb>=0.4.0
-rank_bm25>=0.2.2
-ollama>=0.1.0
-sentence-transformers>=2.7.0
+# --- Day 1: PDF parsing & chunking ---
+pymupdf
+
+# --- Day 2: Embedding & dual indexing ---
+chromadb
+rank_bm25
+ollama
+
+# --- Day 3: Hybrid retrieval & reranking ---
+sentence-transformers
+
+# --- Day 5: Backend (auth, DB, API) ---
+fastapi
+uvicorn
+python-jose[cryptography]
+passlib[bcrypt]
+# IMPORTANT: passlib 1.7.4 (last released 2020) probes bcrypt's internal
+# __about__.__version__ attribute to detect the backend version. bcrypt
+# 4.1+ removed that attribute, which breaks passlib's version detection
+# and makes EVERY password check fail with a false "password too long"
+# error, even for short passwords. Pin bcrypt below 4.1 until passlib
+# ships a fix.
+bcrypt==4.0.1
+sqlmodel
+python-multipart
+httpx
+zoneinfo
+# --- Testing (all days) ---
+pytest
